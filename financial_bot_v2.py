@@ -1,3 +1,4 @@
+
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 from flask import Flask, request, jsonify
@@ -22,8 +23,22 @@ class FinancialBotV2:
         )
         self.system_instructions = "You're a financial assistant known as Deon. Give personalized advice with a friendly touch and also add humor."
 
+    def get_user_profile(self, user_id):
+        try:
+            profile = supabase.table("user_profiles").select("*").eq('user_id', user_id).execute().data
+            return profile[0] if profile else None
+        except Exception as e:
+            print(f"Error fetching user profile: {str(e)}")
+            return None
+
+    def get_financial_goals(self, user_id):
+        try:
+            return supabase.table("financial_goals").select("*").eq('user_id', user_id).execute().data
+        except Exception as e:
+            print(f"Error fetching financial goals: {str(e)}")
+            return []
+
     def update_embeddings_for_existing_transactions(self):
-        """Update embeddings for all transactions that don't have them"""
         try:
             transactions = supabase.table("transactions").select("*").execute().data
             
@@ -45,7 +60,11 @@ class FinancialBotV2:
         try:
             query_embedding = embedding_model.encode(query).tolist()
             
-            # First try semantic search
+            # Get user profile and financial goals
+            user_profile = self.get_user_profile(user_id)
+            financial_goals = self.get_financial_goals(user_id)
+            
+            # First try semantic search for transactions
             matched_transactions = supabase.rpc(
                 'match_transactions',
                 {
@@ -57,51 +76,59 @@ class FinancialBotV2:
 
             if matched_transactions:
                 transaction_ids = [t['transaction_id'] for t in matched_transactions]
-                return supabase.table("transactions")\
+                transactions = supabase.table("transactions")\
                     .select("*")\
                     .in_('transaction_id', transaction_ids)\
                     .execute().data
+            else:
+                transactions = supabase.table("transactions").select("*").execute().data
 
-            # Fallback to original logic
-            transactions = supabase.table("transactions").select("*").execute().data
-            
-            if "last transaction" in query.lower():
-                return [max(transactions, key=lambda x: x['transaction_date'])]
-            elif "how many" in query.lower() and "transactions" in query.lower():
-                return transactions
-            
-            return transactions[-100:]
+            return {
+                'transactions': transactions,
+                'user_profile': user_profile,
+                'financial_goals': financial_goals
+            }
 
         except Exception as e:
             print(f"Query error: {str(e)}")
-            return []
+            return {'transactions': [], 'user_profile': None, 'financial_goals': []}
 
     def get_response(self, query, user_id):
         relevant_data = self.retrieve_relevant_data(query, user_id)
         
-        context = "\n".join([
+        # Format transaction context
+        transaction_context = "\n".join([
             f"- Transaction on {t['transaction_date']}: ${t['amount']} - {t['category']}/{t['subcategory']} ({t['type']}) paid via {t['mode_of_payment']}"
-            for t in relevant_data
+            for t in relevant_data['transactions']
         ])
 
-        if "how many" in query.lower() and "transactions" in query.lower():
-            prompt = f"You have {len(relevant_data)} transactions in total. Recent transactions:\n{context}\nProvide a friendly summary."
-        elif "last transaction" in query.lower():
-            prompt = f"Most recent transaction:\n{context}\nProvide a friendly summary."
-        else:
-            prompt = f"""
-            {self.system_instructions}
-            
-            Most relevant transactions based on your query:
-            {context}
-            
-            Question: {query}
-            """
+        # Format user profile context
+        profile = relevant_data['user_profile']
+        profile_context = f"\nUser Profile:\nAge: {profile['age']}\nIncome: ${profile['income']}\nDebts: ${profile['debts']}\nAccount Balance: ${profile['account_balance']}" if profile else ""
+
+        # Format financial goals context
+        goals_context = "\nFinancial Goals:\n" + "\n".join([
+            f"- {g['goal_name']}: Target ${g['target_amount']}, Current Progress: ${g['current_amount']}, Due: {g['target_date']}"
+            for g in relevant_data['financial_goals']
+        ]) if relevant_data['financial_goals'] else ""
+
+        prompt = f"""
+        {self.system_instructions}
+        
+        User Financial Information:
+        {profile_context}
+        {goals_context}
+        
+        Recent Transactions:
+        {transaction_context}
+        
+        Question: {query}
+        """
 
         response = self.model.generate_content(prompt)
         return response.text
 
-# Initialize Flask app
+# Flask app initialization remains the same
 app = Flask(__name__)
 financial_bot = FinancialBotV2(api_key=GEMINI_API_KEY)
 
@@ -114,14 +141,13 @@ def update_embeddings():
 def chat():
     data = request.json
     query = data.get('query')
-    user_id = data.get('user_id', 1)
+    user_id = str(data.get('user_id', 1))  # Convert to string
     response = financial_bot.get_response(query, user_id)
     return jsonify({"response": response})
 
 if __name__ == '__main__':
-    print("Welcome to Spendrick V2 - Now with semantic search!")
+    print("Welcome to Spendrick V2 - Now with comprehensive financial insights!")
     
-    # Update embeddings for existing transactions
     financial_bot.update_embeddings_for_existing_transactions()
     print("✓ Embeddings updated for all transactions")
     
@@ -129,6 +155,6 @@ if __name__ == '__main__':
         query = input("\nEnter your financial question (or 'quit' to exit): ")
         if query.lower() == 'quit':
             break
-        response = financial_bot.get_response(query, user_id=1)
+        response = financial_bot.get_response(query, user_id="1")  # Pass as string
         print("\nFinancial Advice:", response)
         print("\n" + "="*50)
