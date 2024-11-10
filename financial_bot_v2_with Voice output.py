@@ -3,7 +3,7 @@ from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 from flask import Flask, request, jsonify
 import google.generativeai as genai
-from config import GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY
+from config1 import GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY
 import numpy as np
 import speech_recognition as sr
 from gtts import gTTS
@@ -11,6 +11,7 @@ import os
 import pygame
 import playsound
 from flask import send_file
+import pyttsx3
 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -33,18 +34,102 @@ class FinancialBotV2:
 
     def get_user_profile(self, user_id):
         try:
-            profile = supabase.table("user_profiles").select("*").eq('user_id', user_id).execute().data
+            profile = supabase.table("profiles")\
+                .select("id, user_id, phone_number, gender, occupation, date_of_birth")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
             return profile[0] if profile else None
         except Exception as e:
             print(f"Error fetching user profile: {str(e)}")
             return None
 
+
     def get_financial_goals(self, user_id):
         try:
-            return supabase.table("financial_goals").select("*").eq('user_id', user_id).execute().data
+            goals = supabase.table("financial_goals")\
+                .select("id, user_id, duration_in_months, goal_type, description, date_created, amount")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return goals
         except Exception as e:
             print(f"Error fetching financial goals: {str(e)}")
             return []
+        
+    def get_bank_accounts(self, user_id):
+        try:
+            accounts = supabase.table("bank_accounts")\
+                .select("id, user_id, bank_name, account_number, amount")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return accounts
+        except Exception as e:
+            print(f"Error fetching bank accounts: {str(e)}")
+            return []
+
+    def get_mobile_money_accounts(self, user_id):
+        try:
+            accounts = supabase.table("mobile_money_accounts")\
+                .select("id, user_id, provider, account_number, amount")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return accounts
+        except Exception as e:
+            print(f"Error fetching mobile money accounts: {str(e)}")
+            return []
+
+    def get_cash_accounts(self, user_id):
+        try:
+            accounts = supabase.table("cash_accounts")\
+                .select("id, user_id, amount")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return accounts
+        except Exception as e:
+            print(f"Error fetching cash accounts: {str(e)}")
+            return []
+
+    def get_debts(self, user_id):
+        try:
+            debts = supabase.table("debts")\
+                .select("id, user_id, debt_type, amount, date_created")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return debts
+        except Exception as e:
+            print(f"Error fetching debts: {str(e)}")
+            return []
+
+    def get_debt_repayments(self, user_id):
+        try:
+            repayments = supabase.table("debt_repayments")\
+                .select("id, user_id, debt_id, amount, date_repaid, bank_account_id, mobile_money_account_id, cash_account_id")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return repayments
+        except Exception as e:
+            print(f"Error fetching debt repayments: {str(e)}")
+            return []
+
+    def get_notifications(self, user_id):
+        try:
+            notifications = supabase.table("notifications")\
+                .select("id, user_id, frequency, message, date_created, is_sent")\
+                .eq('user_id', user_id)\
+                .execute()\
+                .data
+            return notifications
+        except Exception as e:
+            print(f"Error fetching notifications: {str(e)}")
+            return []
+
+
     def update_embeddings_for_existing_transactions(self):
         max_retries = 3
         retry_count = 0
@@ -54,13 +139,14 @@ class FinancialBotV2:
                 transactions = supabase.table("transactions").select("*").execute().data
             
                 for transaction in transactions:
-                    text_to_embed = f"{transaction['category']} {transaction['subcategory']} {transaction['type']}"
+                    text_to_embed = f"{transaction['expense_category']} {transaction['income_category']} {transaction['type']}"
                     embedding = embedding_model.encode(text_to_embed).tolist()
-                
+                    
                     supabase.table("transactions")\
                         .update({"embedding": embedding})\
-                        .eq('transaction_id', transaction['transaction_id'])\
+                        .eq('id', transaction['id'])\
                         .execute()
+
             
                 return "Embeddings updated successfully!"
             
@@ -70,43 +156,82 @@ class FinancialBotV2:
                     print(f"Final attempt failed: {str(e)}")
                     return "Process completed with errors"
                 print(f"Retrying... Attempt {retry_count} of {max_retries}")
+
+    def get_account_summaries(self, user_id, relevant_data):
+        total_bank = sum(acc['amount'] for acc in relevant_data['bank_accounts'])
+        total_mobile = sum(acc['amount'] for acc in relevant_data['mobile_money_accounts'])
+        total_cash = sum(acc['amount'] for acc in relevant_data['cash_accounts'])
+        total_debt = sum(debt['amount'] for debt in relevant_data['debts'])
+        
+        return f"""
+        Account Summaries:
+        Total Bank Balance: ${total_bank:,.2f}
+        Total Mobile Money: ${total_mobile:,.2f}
+        Total Cash: ${total_cash:,.2f}
+        Total Debt: ${total_debt:,.2f}
+        Net Worth: ${(total_bank + total_mobile + total_cash - total_debt):,.2f}
+        """
+    
+    def get_debt_summary(self, relevant_data):
+        debt_summary = []
+        for debt in relevant_data['debts']:
+            repayments = [r for r in relevant_data['debt_repayments'] if r['debt_id'] == debt['id']]
+            total_repaid = sum(r['amount'] for r in repayments)
+            debt_summary.append(
+                f"- {debt['debt_type']}: ${debt['amount']:.2f} (Repaid: ${total_repaid:.2f})"
+            )
+        return "\n".join(debt_summary)
+
     def retrieve_relevant_data(self, query, user_id):
         try:
-            query_embedding = embedding_model.encode(query).tolist()
-            
-            # Get user profile and financial goals
+            # Get comprehensive user financial data
             user_profile = self.get_user_profile(user_id)
             financial_goals = self.get_financial_goals(user_id)
-            
-            # First try semantic search for transactions
-            matched_transactions = supabase.rpc(
-                'match_transactions',
-                {
-                    'query_embedding': query_embedding,
-                    'match_threshold': 0.7,
-                    'match_count': 5
-                }
-            ).execute().data
+            bank_accounts = self.get_bank_accounts(user_id)
+            mobile_money_accounts = self.get_mobile_money_accounts(user_id)
+            cash_accounts = self.get_cash_accounts(user_id)
+            debts = self.get_debts(user_id)
+            debt_repayments = self.get_debt_repayments(user_id)
+            notifications = self.get_notifications(user_id)
 
-            if matched_transactions:
-                transaction_ids = [t['transaction_id'] for t in matched_transactions]
-                transactions = supabase.table("transactions")\
-                    .select("*")\
-                    .in_('transaction_id', transaction_ids)\
-                    .execute().data
-            else:
-                transactions = supabase.table("transactions").select("*").execute().data
+            # Get recent transactions directly
+            transactions = supabase.table("transactions")\
+                .select("*")\
+                .eq('user_id', user_id)\
+                .order('transaction_date', desc=True)\
+                .limit(10)\
+                .execute().data
 
             return {
                 'transactions': transactions,
                 'user_profile': user_profile,
-                'financial_goals': financial_goals
+                'financial_goals': financial_goals,
+                'bank_accounts': bank_accounts,
+                'mobile_money_accounts': mobile_money_accounts,
+                'cash_accounts': cash_accounts,
+                'debts': debts,
+                'debt_repayments': debt_repayments,
+                'notifications': notifications
             }
 
         except Exception as e:
             print(f"Query error: {str(e)}")
-            return {'transactions': [], 'user_profile': None, 'financial_goals': []}
-        
+            return {
+                'transactions': [],
+                'user_profile': None,
+                'financial_goals': [],
+                'bank_accounts': [],
+                'mobile_money_accounts': [],
+                'cash_accounts': [],
+                'debts': [],
+                'debt_repayments': [],
+                'notifications': []
+            }
+    def process_command(self, query):
+        # Extract user_id from the query
+        user_id = self.extract_user_id(query)
+        if user_id is None:
+            return "User ID not found in the query."
 
         
     def listen_for_command(self):
@@ -124,27 +249,30 @@ class FinancialBotV2:
             except sr.RequestError:
                 print("Could not request results")
                 return None
-    def speak_response(self, text):
-        try:
-            from playsound import playsound  
-            tts = gTTS(text=text, lang='en')
-            temp_file = "temp_response.mp3"
-            tts.save(temp_file)
-            playsound(temp_file)  
-            os.remove(temp_file)
-        except Exception as e:
-            print(f"Audio playback error: {str(e)}")
-            print("Text response:", text)
+    def speak_response(self, text,voice_gender='male'):
+        engine = pyttsx3.init()
+        voices = engine.getProperty('voices')
+        # voice settings
+        voice_id = voices[0].id if voice_gender == 'male' else voices[1].id
+        engine.setProperty('voice', voice_id)
+        #voices = engine.getProperty('voices')
+        #engine.setProperty('voice', voices[0].id)  # 1 Female voice and 0 Male voice
+        engine.setProperty('rate', 150)  # Speech rate
+        engine.setProperty('volume', 0.9)  # Volume level
+    
+        # Speak the text
+        engine.say(text)
+        engine.runAndWait()
     def process_input(self, input_type="text"):
         if input_type == "voice":
                 return self.listen_for_command()
         else:
             return input("\nEnter your financial question (or 'quit' to exit): ")
 
-    def deliver_response(self, response, output_type="text"):
+    def deliver_response(self, response, output_type="text", voice_gender="male"):
         print("\nFinancial Advice:", response)
         if output_type == "voice":
-            self.speak_response(response)
+            self.speak_response(response, voice_gender)
 
     def store_chat_history(self, user_id, query, response):
         try:
@@ -173,44 +301,92 @@ class FinancialBotV2:
         relevant_data = self.retrieve_relevant_data(query, user_id)
         chat_history = self.get_chat_history(user_id)
         
-        # chat history context
+        # Calculate financial summaries
+        total_bank = sum(acc['amount'] for acc in relevant_data['bank_accounts'])
+        total_mobile = sum(acc['amount'] for acc in relevant_data['mobile_money_accounts'])
+        total_cash = sum(acc['amount'] for acc in relevant_data['cash_accounts'])
+        total_debt = sum(debt['amount'] for debt in relevant_data['debts'])
+        net_worth = total_bank + total_mobile + total_cash - total_debt
+        
+        # Format account summaries
+        account_summary = f"""
+        Financial Overview:
+        Bank Accounts Total: ${total_bank:,.2f}
+        Mobile Money Total: ${total_mobile:,.2f}
+        Cash Total: ${total_cash:,.2f}
+        Total Debt: ${total_debt:,.2f}
+        Net Worth: ${net_worth:,.2f}
+        """
+        
+        # Format detailed accounts
+        accounts_detail = "\nAccount Details:"
+        for acc in relevant_data['bank_accounts']:
+            accounts_detail += f"\nBank - {acc['bank_name']}: ${acc['amount']:,.2f}"
+        for acc in relevant_data['mobile_money_accounts']:
+            accounts_detail += f"\nMobile Money - {acc['provider']}: ${acc['amount']:,.2f}"
+        
+        # Format debt details
+        debt_details = "\nDebt Details:"
+        for debt in relevant_data['debts']:
+            repayments = [r for r in relevant_data['debt_repayments'] if r['debt_id'] == debt['id']]
+            total_repaid = sum(r['amount'] for r in repayments)
+            debt_details += f"\n{debt['debt_type']}: ${debt['amount']:,.2f} (Repaid: ${total_repaid:,.2f})"
+        
+        # Chat history context
         history_context = "\nPrevious Conversation:\n" + "\n".join([
             f"User: {exchange['query']}\nAssistant: {exchange['response']}"
             for exchange in chat_history
         ]) if chat_history else ""
         
-        # transaction context
-        transaction_context = "\n".join([
-            f"- Transaction on {t['transaction_date']}: ${t['amount']} - {t['category']}/{t['subcategory']} ({t['type']}) paid via {t['mode_of_payment']}"
+        # Transaction context
+        transaction_context = "\nRecent Transactions:\n" + "\n".join([
+            f"- {t['transaction_date']}: ${t['amount']:,.2f} - {t['expense_category'] or t['income_category']} ({t['type']})"
             for t in relevant_data['transactions']
         ])
-
         
+        # Profile context
         profile = relevant_data['user_profile']
-        profile_context = f"\nUser Profile:\nAge: {profile['age']}\nIncome: ${profile['income']}\nDebts: ${profile['debts']}\nAccount Balance: ${profile['account_balance']}" if profile else ""
-
+        profile_context = f"""
+        User Profile:
+        Phone: {profile['phone_number']}
+        Gender: {profile['gender']}
+        Occupation: {profile['occupation']}
+        Date of Birth: {profile['date_of_birth']}
+        """ if profile else ""
         
+        # Financial Goals context
         goals_context = "\nFinancial Goals:\n" + "\n".join([
-            f"- {g['goal_name']}: Target ${g['target_amount']}, Current Progress: ${g['current_amount']}, Due: {g['target_date']}"
+            f"- {g['goal_type']}: ${g['amount']:,.2f} over {g['duration_in_months']} months (Started: {g['date_created']})"
             for g in relevant_data['financial_goals']
         ]) if relevant_data['financial_goals'] else ""
-
+        
+        # Notifications
+        notifications = "\nRecent Notifications:\n" + "\n".join([
+            f"- {n['message']} ({n['date_created']})"
+            for n in relevant_data['notifications']
+        ]) if relevant_data['notifications'] else ""
+        
         prompt = f"""
         {self.system_instructions}
         
-        User Financial Information:
+        {account_summary}
+        {accounts_detail}
+        {debt_details}
+        
         {profile_context}
         {goals_context}
-        
-        Recent Transactions:
         {transaction_context}
-        
+        {notifications}
         {history_context}
         
         Question: {query}
         """
-
+        
         response = self.model.generate_content(prompt)
+        self.store_chat_history(user_id, query, response.text)
+        return response.text
+
+
         
         # Store the new exchange in history
         self.store_chat_history(user_id, query, response.text)
@@ -248,10 +424,15 @@ if __name__ == '__main__':
     print("\nChoose your interaction mode:")
     print("1. Text to Text")
     print("2. Voice to Voice")
-    print("3. Text to Voice")
-    print("4. Voice to Text")
+    #print("3. Text to Voice")
+    #print("4. Voice to Text")
+    print("\nSelect voice gender:")
+    print("1. Male")
+    print("2. Female")
+    voice_choice = input("Select voice (1-2): ")
+    voice_gender = 'male' if voice_choice == '1' else 'female'
     
-    mode = input("Select mode (1-4): ")
+    mode = input("Select mode (1-2): ")
     
     while True:
         input_type = "voice" if mode in ["2", "4"] else "text"
@@ -262,7 +443,7 @@ if __name__ == '__main__':
             break
             
         response = financial_bot.get_response(query, user_id="1")
-        financial_bot.deliver_response(response, output_type)
+        financial_bot.deliver_response(response, output_type, voice_gender)
         print("\n" + "="*50)
 
 
@@ -325,3 +506,5 @@ def interact():
             "response": response,
             "history": financial_bot.get_chat_history(user_id)
         })
+
+
